@@ -1,10 +1,11 @@
+use futures::{SinkExt, StreamExt, stream::BoxStream};
 use iced::{
-    Alignment, Color, Element, Font, Length, Padding, Renderer, Subscription, Task, border::{self, Radius}, futures::Stream, stream, theme::{
-        self, 
-        Theme
-    }, widget::{
-            Container, Space, button::Status, container, mouse_area, row, space, svg, text
-    }, window
+    Alignment, Color, Element, Font, Length, Padding, Renderer, Subscription, Task,
+    border::{self, Radius},
+    stream,
+    theme::{self, Theme},
+    widget::{Container, Space, button::Status, container, mouse_area, row, space, svg, text},
+    window,
 };
 
 use iced::widget::button;
@@ -12,22 +13,22 @@ use iced::widget::button;
 use iced_layershell::{
     daemon,
     reexport::{Anchor, NewLayerShellSettings},
-    settings::{
-        LayerShellSettings, Settings, StartMode
-    },
-    to_layer_message
+    settings::{LayerShellSettings, Settings, StartMode},
+    to_layer_message,
 };
-use mpris_client_async::{Mpris, Playback, Player, PlayerEvent, properties::PlaybackStatus};
 
-use futures::{SinkExt, pin_mut, stream::StreamExt};
-
-use std::{collections::HashMap, sync::Arc, time::Duration};
 use chrono::Local;
+use mpris_client_async::{
+    Mpris, Player,
+    properties::{PlaybackStatus, Property},
+    streams::mpris::MprisEvent,
+};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 // Weather backend
 mod weather;
+use crate::weather::{CurrentWeather, HourlyWeather};
 use weather::prelude::*;
-use crate::{media_utils::MprisEvent, weather::{CurrentWeather, HourlyWeather}};
 
 // The notification of rusty bar to the user (things like errrors, notices, and other messages)
 mod notification;
@@ -42,13 +43,11 @@ use windows::weather_window;
 
 mod graph;
 
-mod media_utils;
-
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 enum WindowType {
     Main,
-    Weather
+    Weather,
 }
 
 #[to_layer_message(multi)]
@@ -57,15 +56,13 @@ enum Message {
     /// Does absolutely nothing
     Nothing,
 
+    //  INTERNAL STUFF   \\
     NewNotif(Notification),
     NotifRetry(Notification),
 
-
     SecondTrigger,
 
-
-
-    //      WEATHER      \\
+    //      WEATHER     \\
     ParseWeather,
 
     ParseCurrentWeather,
@@ -77,69 +74,56 @@ enum Message {
     WeatherWindowMessage(weather_window::Message),
     WeatherWindowToggle,
 
-
-    //      MPRIS      \\
-    PlayerEvent(MprisEvent),
-
-    /// This runs when a new mpris object has been returned, and replaces the one in the state
-    NewPlayers(Result<Vec<Arc<Player>>, zbus::Error>),
-    TrackedPlayer(Option<Arc<Player>>),
+    //      MPRIS       \\
+    MprisEvent(MprisEvent),
 }
 
 #[derive(Default)]
 struct State {
+    //  GLOBAL VARS \\
     window_ids: HashMap<window::Id, WindowType>,
-// GLOBAL VARS
     theme: Option<Theme>,
     radius: i32,
     time_fmt: &'static str,
     spacing: u32,
     hpadding: u32,
     notifications: Vec<Notification>,
-// LEFT SIDE
-    clock: String,
-    clock_widget_width: u32,    // TODO: ELLIMINATE!!
 
-    // Parse initial stuff, it will only be run once, when the program starts
+    //  LEFT SIDE   \\
+    clock: String,
+    clock_widget_width: u32, // TODO: ELLIMINATE!!
+
+    // Parse initial values, it will only
+    // be run once, when the program starts
     first_parse: bool,
 
-
-
     //      WEATHER      \\
-
-    // None if the location should be parsed from ip address, not a specified position
-    tracked_location: Option<Coordinates>,
     units: Units,
     weather_current: Option<CurrentWeather>,
+    // None if the location should be parsed from ip address, not a specified position
+    tracked_location: Option<Coordinates>,
 
     weather_hourly: Vec<HourlyWeather>,
     weather_hours_to_parse: Option<u8>,
-    
 
     weather_window_id: Option<window::Id>,
     weather_window_state: weather_window::State,
 
-
-
     //      MPRIS      \\
-    // An mpris instance is made in subscription, and every time a player_change event occurs it sends an arc copy.
-    mpris: Option<Arc<Mpris<'static>>>,
-
-    tracked_player: Option<Arc<Player>>,
     players: Vec<Arc<Player>>,
 }
 
 impl State {
     fn new(
         theme: Theme,
-        radius: i32, 
-        spacing: u32, 
-        time_fmt: &'static str, 
+        radius: i32,
+        spacing: u32,
+        time_fmt: &'static str,
         clock_widget_width: u32,
         hpadding: u32,
-        units: Units
+        units: Units,
     ) -> Self {
-        Self { 
+        Self {
             theme: Some(theme),
             radius,
             time_fmt,
@@ -148,7 +132,7 @@ impl State {
             hpadding,
             units,
             first_parse: true,
-            ..Default::default() 
+            ..Default::default()
         }
     }
 
@@ -161,17 +145,14 @@ impl State {
                 self.window_ids.remove(&id);
                 println!("Removing window id {id}");
                 Task::none()
-            },
-
+            }
 
             NewNotif(notif) => {
                 println!("New notification: {:#?}", notif);
                 self.notifications.push(notif);
                 Task::none()
-            },
+            }
             NotifRetry(notif) => notif.retry().expect("{0}"),
-            
-
 
             SecondTrigger => {
                 let now = Local::now();
@@ -179,61 +160,54 @@ impl State {
 
                 if self.first_parse {
                     self.first_parse = false;
-                    Task::batch(
-                        [
-                            Task::done(Message::ParseCurrentWeather)
-                        ]
-                    )
+                    Task::batch([Task::done(Message::ParseCurrentWeather)])
                 } else {
                     Task::none()
                 }
-            },
-            
+            }
 
-
-            ParseWeather => Task::batch(vec![Task::done(Message::ParseCurrentWeather), Task::done(Message::ParseHourlyWeather)]),
+            //      WEATHER     \\
+            ParseWeather => Task::batch(vec![
+                Task::done(Message::ParseCurrentWeather),
+                Task::done(Message::ParseHourlyWeather),
+            ]),
 
             ParseCurrentWeather => {
                 println!("Parsing current weather");
 
                 use argument::Current;
-                Task::perform(get_current(
-                    self.tracked_location.clone(), 
-                    self.units.clone(),
-                    vec![
-                        Current::Temperature,
-                        Current::IsDay,
-                        Current::ApparentTemp,
-                        Current::Humidity,
-                        Current::WeatherCode,
-                        Current::WindDirection,
-                        Current::WindSpeed,
-                        Current::Precipitation(argument::PrecipitationType::Combined),
-                        Current::Precipitation(argument::PrecipitationType::Rain),
-                        Current::Precipitation(argument::PrecipitationType::Showers),
-                        Current::Precipitation(argument::PrecipitationType::Snowfall)
-                    ]
-                ), Message::CurrentWeatherParsed)
-            },
-            CurrentWeatherParsed(result) => {
-                match result {
-                    Ok(weather) => {
-                        self.weather_current = Some(weather);
-                        Task::none()
-                    },
-                    Err(e) => {
-                        Task::done(
-                            NewNotif(
-                                Notification::new_with_retry(
-                                    notification::Level::Error, 
-                                    e.to_string(), 
-                                    Local::now(),
-                                    &Message::ParseCurrentWeather
-                                )
-                            )
-                        )
-                    }
+                Task::perform(
+                    get_current(
+                        self.tracked_location.clone(),
+                        self.units.clone(),
+                        vec![
+                            Current::Temperature,
+                            Current::IsDay,
+                            Current::ApparentTemp,
+                            Current::Humidity,
+                            Current::WeatherCode,
+                            Current::WindDirection,
+                            Current::WindSpeed,
+                            Current::Precipitation(argument::PrecipitationType::Combined),
+                            Current::Precipitation(argument::PrecipitationType::Rain),
+                            Current::Precipitation(argument::PrecipitationType::Showers),
+                            Current::Precipitation(argument::PrecipitationType::Snowfall),
+                        ],
+                    ),
+                    Message::CurrentWeatherParsed,
+                )
+            }
+            CurrentWeatherParsed(result) => match result {
+                Ok(weather) => {
+                    self.weather_current = Some(weather);
+                    Task::none()
                 }
+                Err(e) => Task::done(NewNotif(Notification::new_with_retry(
+                    notification::Level::Error,
+                    e.to_string(),
+                    Local::now(),
+                    &Message::ParseCurrentWeather,
+                ))),
             },
 
             ParseHourlyWeather => {
@@ -243,8 +217,8 @@ impl State {
                 use argument::Hourly;
                 Task::perform(
                     get_hourly(
-                        self.tracked_location.clone(), 
-                        self.units.clone(), 
+                        self.tracked_location.clone(),
+                        self.units.clone(),
                         vec![
                             Hourly::WeatherCode,
                             Hourly::Temperature,
@@ -255,34 +229,25 @@ impl State {
                             Hourly::Precipitation(argument::PrecipitationType::Combined),
                             Hourly::Precipitation(argument::PrecipitationType::Rain),
                             Hourly::Precipitation(argument::PrecipitationType::Showers),
-                            Hourly::Precipitation(argument::PrecipitationType::Snowfall)
+                            Hourly::Precipitation(argument::PrecipitationType::Snowfall),
                         ],
-                        hours
-                    ), 
-                    Message::HourlyWeatherParsed
+                        hours,
+                    ),
+                    Message::HourlyWeatherParsed,
                 )
-            },
-            HourlyWeatherParsed(result) => {
-                match result {
-                    Ok(result) => {
-                        self.weather_hourly = result;
-                        Task::none()
-                    },
-                    Err(e) => {
-                        Task::done(
-                            NewNotif(
-                                Notification::new_with_retry(
-                                    notification::Level::Error, 
-                                    e, 
-                                    Local::now(), 
-                                    &ParseHourlyWeather
-                                )
-                            )
-                        )
-                    }
-                }
             }
-
+            HourlyWeatherParsed(result) => match result {
+                Ok(result) => {
+                    self.weather_hourly = result;
+                    Task::none()
+                }
+                Err(e) => Task::done(NewNotif(Notification::new_with_retry(
+                    notification::Level::Error,
+                    e,
+                    Local::now(),
+                    &ParseHourlyWeather,
+                ))),
+            },
 
             WeatherWindowToggle => {
                 if let Some(id) = self.weather_window_id {
@@ -301,85 +266,45 @@ impl State {
                     //     println!("Opening weather popup, but hourly_weather is not parsed, requesting parsing!");
                     //     tasks.push(Task::done(ParseHourlyWeather));
                     // }
-                    
-                    tasks.push(
-                        Task::done(Message::NewLayerShell { 
-                            settings: NewLayerShellSettings { 
-                                size: Some((450, 400)),
-                                layer: iced_layershell::reexport::Layer::Top,
-                                anchor: Anchor::Top | Anchor::Left,
-                                margin: Some((10, 0, 0, 30)),
-                                keyboard_interactivity: iced_layershell::reexport::KeyboardInteractivity::OnDemand, 
-                                output_option: iced_layershell::reexport::OutputOption::None,
-                                ..Default::default()
-                            },
-                            id
-                        })
-                    );
+
+                    tasks.push(Task::done(Message::NewLayerShell {
+                        settings: NewLayerShellSettings {
+                            size: Some((450, 400)),
+                            layer: iced_layershell::reexport::Layer::Top,
+                            anchor: Anchor::Top | Anchor::Left,
+                            margin: Some((10, 0, 0, 30)),
+                            keyboard_interactivity:
+                                iced_layershell::reexport::KeyboardInteractivity::OnDemand,
+                            output_option: iced_layershell::reexport::OutputOption::None,
+                            ..Default::default()
+                        },
+                        id,
+                    }));
 
                     Task::batch(tasks)
                 }
-            },
+            }
             WeatherWindowMessage(msg) => self.weather_window_state.update(msg),
 
-
-
-            PlayerEvent(event) => {
+            //      MPRIS       \\
+            MprisEvent(event) => {
+                use mpris_client_async::streams::mpris::MprisEvent::*;
                 match event {
-                    MprisEvent::StreamEnded => {
-                        self.mpris = None;
-                        self.tracked_player = None;
-
-                        println!("MPRIS stream ended");
-
-                        Task::none()
-                    },
-                    MprisEvent::NewInstance(instance) => {
-                        println!("New MPRIS instance");
-
-                        self.mpris = Some(instance.clone());
-                        Task::perform(async move {instance.get_players().await}, NewPlayers)
-                    },
-                    MprisEvent::Event(event) => {
-                        println!("New event: {:?}", event);
-
-                        use mpris_client_async::PlayerEvent::*;
-                        match event {
-                            Connected(player) => self.players.push(player),
-                            Disconnected(player) => {
-                                // If the player was the tracked, clear it
-                                if let Some(tracked) = self.tracked_player.as_ref() && tracked.dbus_name() == player.dbus_name() {
-                                    self.tracked_player = None;
-                                }
-
-                                self.players.retain(|other| player.dbus_name() != other.dbus_name());
-                            }
-                        };
-
-                        let cloned = self.players.iter().map(|player| player.clone()).collect();
-                        Task::perform(media_utils::get_tracked_player(cloned), TrackedPlayer)
+                    Added(player) => {
+                        println!("Player added with name \"{}\"", player.dbus_name());
+                        self.players.push(player);
                     }
+                    Removed(player_name) => {
+                        println!("Player removed with name \"{}\"", player_name);
+                        self.players
+                            .retain(|player| player.dbus_name() == player_name);
+                    }
+                    _ => println!("@@@ MPRIS EVENT"),
                 }
-            },
-
-            NewPlayers(maybe_players) => {
-                self.tracked_player = None;
-                match maybe_players {
-                    Ok(players) => self.players = players,
-                    Err(e) => eprintln!("get_players on mpris object returned with error: {e}")
-                }
-
-                let cloned: Vec<Arc<Player>> = self.players.iter().map(|player| player.clone()).collect();
-                Task::perform(media_utils::get_tracked_player(cloned), TrackedPlayer)
-            },
-            TrackedPlayer(player) => {
-                println!("Currently tracked player is: {}", player.as_ref().unwrap().dbus_name());
-                self.tracked_player = player;
-
                 Task::none()
             }
 
-            _ => {Task::none()}
+            _ => Task::none(),
         }
     }
 
@@ -392,16 +317,16 @@ impl State {
             .style(|theme: &Theme| {
                 let palette = theme.extended_palette();
 
-                container::Style::default()
-                    .background(palette.background.weakest.color)
+                container::Style::default().background(palette.background.weakest.color)
             })
     }
 
-    /// Returns the type of the window, if it's not found in `self.window_ids` it's assumed to be Main
+    /// Returns the type of the window, if it's not found in
+    /// `self.window_ids` it's assumed to be Main.
     fn match_id(&self, id: &window::Id) -> &WindowType {
         match self.window_ids.get(&id) {
             Some(window) => window,
-            None => &WindowType::Main
+            None => &WindowType::Main,
         }
     }
 
@@ -414,41 +339,44 @@ impl State {
     }
 
     fn main_view(&self) -> Element<'_, Message> {
-        let clock = { container(
-            text(&self.clock)
-            .size(36)
-            .center()
-            .width(self.clock_widget_width)
-            .style(text::primary)
-        )
-        .padding(Padding::default().horizontal(self.hpadding))
-        .width(Length::Shrink)
-        .height(Length::Fill)
-        .style(|theme: &Theme| {
-            let palette = theme.extended_palette();
+        let clock = {
+            container(
+                text(&self.clock)
+                    .size(36)
+                    .center()
+                    .width(self.clock_widget_width)
+                    .style(text::primary),
+            )
+            .padding(Padding::default().horizontal(self.hpadding))
+            .width(Length::Shrink)
+            .height(Length::Fill)
+            .style(|theme: &Theme| {
+                let palette = theme.extended_palette();
 
-            container::Style::default()
-                .background(palette.background.weak.color)
-                .border(border::rounded(self.radius))
-        })
+                container::Style::default()
+                    .background(palette.background.weak.color)
+                    .border(border::rounded(self.radius))
+            })
         };
-        
+
         let weather_widget: Element<'_, Message> = {
             match &self.weather_current {
                 Some(weather) => {
                     let svg_handle = svg::Handle::from_memory(
                         get_svg(
-                            if weather.is_day.unwrap() {"day"} else {"night"},
-                            weather.code.as_ref().unwrap().get_svg_name().as_str()
-                        ).as_bytes()
+                            if weather.is_day.unwrap() {
+                                "day"
+                            } else {
+                                "night"
+                            },
+                            weather.code.as_ref().unwrap().get_svg_name().as_str(),
+                        )
+                        .as_bytes(),
                     );
 
-                    container
-                    (
-                        mouse_area
-                        (
-                            row!
-                            [
+                    container(
+                        mouse_area(
+                            row![
                                 svg(svg_handle)
                                     .width(36)
                                     .height(36)
@@ -459,9 +387,9 @@ impl State {
                                     .style(text::primary)
                             ]
                             .spacing(5)
-                            .align_y(Alignment::Center)
+                            .align_y(Alignment::Center),
                         )
-                        .on_press(Message::WeatherWindowToggle)
+                        .on_press(Message::WeatherWindowToggle),
                     )
                     .padding(Padding::default().horizontal(self.hpadding))
                     .width(Length::Shrink)
@@ -474,52 +402,46 @@ impl State {
                             .border(border::rounded(self.radius))
                     })
                     .into()
-                },
-                None => {
-                    button
-                    (
-                            svg(
-                                svg::Handle::from_memory(get_svg("commons", "question_mark").as_bytes())
-                            )
-                            .width(36)
-                            .height(36)
-                    )
-                    .on_press(Message::ParseCurrentWeather)
-                    .style(|theme: &Theme, state: Status| button::Style {
-                        background: Some(if state == Status::Hovered {theme.extended_palette().background.stronger.color} else {theme.extended_palette().background.weak.color}.into()),
-                        border: iced::Border { radius: Radius::new(self.radius as f32), ..Default::default() },
-                        ..Default::default()
-                    })
-                    .padding(Padding::default().horizontal(self.hpadding))
-                    .width(Length::Shrink)
-                    .height(Length::Fill)
-                    .into()
                 }
+                None => button(
+                    svg(svg::Handle::from_memory(
+                        get_svg("commons", "question_mark").as_bytes(),
+                    ))
+                    .width(36)
+                    .height(36),
+                )
+                .on_press(Message::ParseCurrentWeather)
+                .style(|theme: &Theme, state: Status| button::Style {
+                    background: Some(
+                        if state == Status::Hovered {
+                            theme.extended_palette().background.stronger.color
+                        } else {
+                            theme.extended_palette().background.weak.color
+                        }
+                        .into(),
+                    ),
+                    border: iced::Border {
+                        radius: Radius::new(self.radius as f32),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .padding(Padding::default().horizontal(self.hpadding))
+                .width(Length::Shrink)
+                .height(Length::Fill)
+                .into(),
             }
         };
 
-        let left = row![
-            clock,
-            Self::separator(),
-            weather_widget,
-            Self::separator(),
-        ]
+        let left = row![clock, Self::separator(), weather_widget, Self::separator(),]
             .align_y(Alignment::Center)
             .spacing(self.spacing);
 
+        //
+        let middle = row![].align_y(Alignment::Center).spacing(self.spacing);
 
-//
-        let middle = row![]
-            .align_y(Alignment::Center)
-            .spacing(self.spacing);
-        
-
-
-//
-        let right = row![]
-            .align_y(Alignment::Center)
-            .spacing(self.spacing);
-
+        //
+        let right = row![].align_y(Alignment::Center).spacing(self.spacing);
 
         container(
             row![
@@ -529,8 +451,8 @@ impl State {
                 space::horizontal(),
                 right
             ]
-                .align_y(Alignment::Center)
-                .padding(5)
+            .align_y(Alignment::Center)
+            .padding(5),
         )
         .width(Length::Fill)
         .height(Length::Fill)
@@ -550,7 +472,8 @@ impl State {
         let subs = vec![
             iced::time::every(Duration::from_secs(1)).map(|_| Message::SecondTrigger),
             iced::time::every(Duration::from_mins(15)).map(|_| Message::ParseCurrentWeather),
-            iced::Subscription::run(media_utils::mpris_subscription).map(Message::PlayerEvent)
+            iced::Subscription::run_with(MprisPlug, mpris_stream_builder)
+                .map(|event| Message::MprisEvent(event)),
         ];
 
         Subscription::batch(subs)
@@ -559,7 +482,7 @@ impl State {
     fn style(_: &State, theme: &Theme) -> theme::Style {
         theme::Style {
             background_color: Color::TRANSPARENT,
-            text_color: theme.palette().text
+            text_color: theme.palette().text,
         }
     }
 }
@@ -584,18 +507,18 @@ fn main() -> iced_layershell::Result {
     daemon(
         move || {
             State::new(
-                theme.clone(), 
-                radius, 
-                spacing, 
-                time_fmt, 
+                theme.clone(),
+                radius,
+                spacing,
+                time_fmt,
                 clock_widget_width,
                 hpadding,
-                units.clone()
+                units.clone(),
             )
         },
         "Rusty Bar",
         State::update,
-        State::view
+        State::view,
     )
     .settings(Settings {
         layer_settings: LayerShellSettings {
@@ -608,16 +531,39 @@ fn main() -> iced_layershell::Result {
             keyboard_interactivity: iced_layershell::reexport::KeyboardInteractivity::OnDemand,
             ..Default::default()
         },
-        fonts: vec![
-            std::include_bytes!("assets/fonts/Itim-Regular.ttf").into()
-        ],
+        fonts: vec![std::include_bytes!("assets/fonts/Itim-Regular.ttf").into()],
         default_font: Font::with_name("Itim"),
         ..Default::default()
     })
     .style(State::style)
-    .theme(|state: &State, _| {
-        state.theme.clone()
-    })
+    .theme(|state: &State, _| state.theme.clone())
     .subscription(State::subscription)
     .run()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct MprisPlug;
+
+fn mpris_stream_builder(_id: &MprisPlug) -> BoxStream<'static, MprisEvent> {
+    stream::channel(32, async |mut output| {
+        println!("creating mpris object");
+        let mpris = Mpris::new()
+            .await
+            .expect("Failed to create MPRIS object: {0}");
+
+        let mut stream = mpris
+            .new_event_loop(vec![PlaybackStatus.into_any()], vec![], true)
+            .await
+            .expect("Failed to create event loop");
+
+        while let Some(event) = stream.next().await {
+            let res = output.send(event).await;
+            println!("@@ res: {:#?}", res)
+        }
+        println!(
+            "players on the bus: {}",
+            mpris.get_players().await.unwrap().len()
+        )
+    })
+    .boxed()
 }

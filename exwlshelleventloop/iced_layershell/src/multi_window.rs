@@ -1215,7 +1215,7 @@ pub(crate) fn run_action<P, C, E: Executor>(
                 }
             }
             ev.request_refresh_all(RefreshRequest::NextFrame);
-        },
+        }
         Action::Tick => {}
     }
 }
