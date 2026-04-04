@@ -21,6 +21,7 @@ use chrono::Local;
 use mpris_client_async::{
     Mpris, Player,
     properties::{PlaybackStatus, Property},
+    signals::{Seeked, Signal},
     streams::mpris::MprisEvent,
 };
 use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -541,6 +542,8 @@ fn main() -> iced_layershell::Result {
     .run()
 }
 
+// Zero sized type to id the mpirs stream builder,
+// so it doesnt get rebuilt every frame
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct MprisPlug;
 
@@ -552,14 +555,18 @@ fn mpris_stream_builder(_id: &MprisPlug) -> BoxStream<'static, MprisEvent> {
             .expect("Failed to create MPRIS object: {0}");
 
         let mut stream = mpris
-            .new_event_loop(vec![PlaybackStatus.into_any()], vec![], true)
+            .new_event_loop(
+                vec![PlaybackStatus.into_any()],
+                vec![Seeked.into_any()],
+                true,
+            )
             .await
             .expect("Failed to create event loop");
 
         while let Some(event) = stream.next().await {
-            let res = output.send(event).await;
-            println!("@@ res: {:#?}", res)
+            let _ = output.send(event).await;
         }
+
         println!(
             "players on the bus: {}",
             mpris.get_players().await.unwrap().len()

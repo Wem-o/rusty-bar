@@ -2373,7 +2373,7 @@ dependencies = [
 [[package]]
 name = "mpris-client-async"
 version = "0.1.0"
-source = "git+https://codeberg.org/Wem-o/mpris-client-async.git?rev=57bc887085500f7ce7e7f8a8668da7af0737fe27#57bc887085500f7ce7e7f8a8668da7af0737fe27"
+source = "git+https://codeberg.org/Wem-o/mpris-client-async.git?rev=9bff5b0c7d4a04830e7113af755e826ade7f62a5#9bff5b0c7d4a04830e7113af755e826ade7f62a5"
 dependencies = [
  "async-lock",
  "async-std",
