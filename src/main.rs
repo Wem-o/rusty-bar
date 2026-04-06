@@ -20,9 +20,9 @@ use iced_layershell::{
 use chrono::Local;
 use mpris_client_async::{
     Mpris, Player,
+    player_types::Playback,
     properties::{PlaybackStatus, Property},
-    signals::{Seeked, Signal},
-    streams::mpris::MprisEvent,
+    streams::{mpris::MprisEvent, player::PropertyYield},
 };
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
@@ -77,6 +77,7 @@ enum Message {
 
     //      MPRIS       \\
     MprisEvent(MprisEvent),
+    PlayerPlaybackChange((Arc<Player>, Playback)),
 }
 
 #[derive(Default)]
@@ -112,6 +113,7 @@ struct State {
 
     //      MPRIS      \\
     players: Vec<Arc<Player>>,
+    tracked_player: Option<Arc<Player>>,
 }
 
 impl State {
@@ -144,12 +146,12 @@ impl State {
 
             RemoveWindow(id) => {
                 self.window_ids.remove(&id);
-                println!("Removing window id {id}");
+                println!("@ICED Removing window id {id}");
                 Task::none()
             }
 
             NewNotif(notif) => {
-                println!("New notification: {:#?}", notif);
+                println!("@N New notification: {:#?}", notif);
                 self.notifications.push(notif);
                 Task::none()
             }
@@ -174,7 +176,7 @@ impl State {
             ]),
 
             ParseCurrentWeather => {
-                println!("Parsing current weather");
+                println!("@W Parsing current weather");
 
                 use argument::Current;
                 Task::perform(
@@ -213,7 +215,7 @@ impl State {
 
             ParseHourlyWeather => {
                 let hours: u8 = self.weather_hours_to_parse.unwrap_or(24);
-                println!("Parsing {} hours of hourly weather!", hours);
+                println!("@W Parsing {} hours of hourly weather!", hours);
 
                 use argument::Hourly;
                 Task::perform(
@@ -291,17 +293,70 @@ impl State {
             MprisEvent(event) => {
                 use mpris_client_async::streams::mpris::MprisEvent::*;
                 match event {
-                    Added(player) => {
-                        println!("Player added with name \"{}\"", player.dbus_name());
+                    Add(player) => {
+                        println!("@M Player added with name \"{}\"", player.dbus_name());
                         self.players.push(player);
+
+                        Task::none()
                     }
-                    Removed(player_name) => {
-                        println!("Player removed with name \"{}\"", player_name);
-                        self.players
-                            .retain(|player| player.dbus_name() == player_name);
+                    Remove(name) => {
+                        println!("@M Player removed with name \"{}\"", name);
+                        self.players.retain(|player| player.dbus_name() != name);
+
+                        if let Some(player) = &self.tracked_player
+                            && player.dbus_name() == name
+                        {
+                            println!("@M Tracked player removed => tracked player is None");
+                            self.tracked_player = None
+                        }
+
+                        Task::none()
                     }
-                    _ => println!("@@@ MPRIS EVENT"),
+                    PropertyChange(any_change) => {
+                        if let Some(playback) = any_change
+                            .value
+                            .downcast_ref::<PropertyYield<PlaybackStatus>>()
+                        {
+                            let player = self
+                                .players
+                                .iter()
+                                .find(|other| other.dbus_name() == playback.player_name);
+
+                            println!(
+                                "@M Player {} is {}. Found object? {}",
+                                playback.player_name,
+                                playback.value,
+                                player.is_some()
+                            );
+
+                            match player {
+                                None => Task::none(),
+                                Some(player) => Task::done(PlayerPlaybackChange((
+                                    player.clone(),
+                                    playback.value.clone(),
+                                ))),
+                            }
+                        } else {
+                            Task::none()
+                        }
+                    }
+                    _ => {
+                        println!("@@ MPRIS EVENT");
+                        Task::none()
+                    }
                 }
+            }
+            PlayerPlaybackChange((player, playback)) => {
+                println!(
+                    "@M PlayerPlaybackChanged called, {}, {}",
+                    player.dbus_name(),
+                    playback
+                );
+
+                if playback != Playback::Stopped {
+                    self.tracked_player = Some(player)
+                }
+
                 Task::none()
             }
 
@@ -434,7 +489,29 @@ impl State {
             }
         };
 
-        let left = row![clock, Self::separator(), weather_widget, Self::separator(),]
+        let media: Element<'_, Message> = {
+            if let Some(player) = &self.tracked_player {
+                container(row![text(format!(
+                    "Media is playing :+1:, by player {}",
+                    player.dbus_name()
+                ))])
+                .into()
+            } else {
+                container(space()).into()
+            }
+        };
+
+        let media_group: Element<'_, Message> = {
+            match &self.tracked_player {
+                Some(_) => row![Self::separator(), media]
+                    .align_y(Alignment::Center)
+                    .spacing(self.spacing)
+                    .into(),
+                None => space().into(),
+            }
+        };
+
+        let left = row![clock, Self::separator(), weather_widget, media_group]
             .align_y(Alignment::Center)
             .spacing(self.spacing);
 
@@ -549,17 +626,13 @@ struct MprisPlug;
 
 fn mpris_stream_builder(_id: &MprisPlug) -> BoxStream<'static, MprisEvent> {
     stream::channel(32, async |mut output| {
-        println!("creating mpris object");
+        println!("@M Creating mpris object");
         let mpris = Mpris::new()
             .await
-            .expect("Failed to create MPRIS object: {0}");
+            .expect("@M Failed to create MPRIS object: {0}");
 
         let mut stream = mpris
-            .new_event_loop(
-                vec![PlaybackStatus.into_any()],
-                vec![Seeked.into_any()],
-                true,
-            )
+            .new_event_loop(vec![PlaybackStatus.into_any()], vec![], false)
             .await
             .expect("Failed to create event loop");
 
@@ -567,10 +640,7 @@ fn mpris_stream_builder(_id: &MprisPlug) -> BoxStream<'static, MprisEvent> {
             let _ = output.send(event).await;
         }
 
-        println!(
-            "players on the bus: {}",
-            mpris.get_players().await.unwrap().len()
-        )
+        println!("@M MPRIS stream ended!!!")
     })
     .boxed()
 }

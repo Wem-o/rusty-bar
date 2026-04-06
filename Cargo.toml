@@ -7,7 +7,8 @@ edition = "2024"
 chrono = { version = "0.4.43", default-features = false, features = ["clock"] }
 tokio = { version = "1.49.0", features = ["full"] }
 
-mpris-client-async = { version = "0.1.0", git = "https://codeberg.org/Wem-o/mpris-client-async.git", rev = "9bff5b0c7d4a04830e7113af755e826ade7f62a5" }
+mpris-client-async = { version = "0.1.0", git = "https://codeberg.org/Wem-o/mpris-client-async.git", rev = "0e092cb962c3793698a9198dd258cf7d7f6f4e22" }
+# mpris-client-async = { version = "0.1.0", path = "../../rs/mpris-client-async/"}
 
 iced = {version = "0.15.0-dev", git = "https://github.com/iced-rs/iced.git", rev = "c2646f6", default-features = false, features = ["debug", "fira-sans", "linux-theme-detection", "tiny-skia", "tokio", "svg", "canvas", "wayland"]}
 iced_layershell = { version = "0.15.0-dev", path = "./exwlshelleventloop/iced_layershell/", default-features = false, features = ["debug", "linux-theme-detection"]}

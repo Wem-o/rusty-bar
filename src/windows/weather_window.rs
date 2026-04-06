@@ -894,8 +894,6 @@ impl State {
 
                                 Wind => {
                                     min = Some(0.0);
-                                    max = Some(100.0);
-                                    steps = Some(20);
 
                                     series.push(Series::evenly_distribute(
                                         state
