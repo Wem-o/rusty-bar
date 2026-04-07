@@ -2373,7 +2373,7 @@ dependencies = [
 [[package]]
 name = "mpris-client-async"
 version = "0.1.0"
-source = "git+https://codeberg.org/Wem-o/mpris-client-async.git?rev=0e092cb962c3793698a9198dd258cf7d7f6f4e22#0e092cb962c3793698a9198dd258cf7d7f6f4e22"
+source = "git+https://codeberg.org/Wem-o/mpris-client-async.git?rev=68efd390ff7610b1b8fa4b18a6f7e0bad73f3889#68efd390ff7610b1b8fa4b18a6f7e0bad73f3889"
 dependencies = [
  "async-lock",
  "async-std",
@@ -3585,6 +3585,7 @@ checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 name = "rusty_bar"
 version = "0.0.1"
 dependencies = [
+ "async-std",
  "chrono",
  "futures",
  "iced",

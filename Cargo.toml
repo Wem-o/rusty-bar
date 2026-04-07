@@ -7,7 +7,7 @@ edition = "2024"
 chrono = { version = "0.4.43", default-features = false, features = ["clock"] }
 tokio = { version = "1.49.0", features = ["full"] }
 
-mpris-client-async = { version = "0.1.0", git = "https://codeberg.org/Wem-o/mpris-client-async.git", rev = "0e092cb962c3793698a9198dd258cf7d7f6f4e22" }
+mpris-client-async = { version = "0.1.0", git = "https://codeberg.org/Wem-o/mpris-client-async.git", rev = "68efd390ff7610b1b8fa4b18a6f7e0bad73f3889" }
 # mpris-client-async = { version = "0.1.0", path = "../../rs/mpris-client-async/"}
 
 iced = {version = "0.15.0-dev", git = "https://github.com/iced-rs/iced.git", rev = "c2646f6", default-features = false, features = ["debug", "fira-sans", "linux-theme-detection", "tiny-skia", "tokio", "svg", "canvas", "wayland"]}
@@ -19,6 +19,7 @@ thiserror = "2.0.18"
 public-ip-address = "0.4.0"
 zbus = "5.14.0"
 futures = "0.3.32"
+async-std = "1.13.2"
 
 [patch.crates-io]
 softbuffer = { git = "https://github.com/pop-os/softbuffer", tag = "cosmic-4.0" }

@@ -1,4 +1,4 @@
-use futures::{SinkExt, StreamExt, stream::BoxStream};
+use futures::{FutureExt, SinkExt, StreamExt, future::join_all, stream::BoxStream};
 use iced::{
     Alignment, Color, Element, Font, Length, Padding, Renderer, Subscription, Task,
     border::{self, Radius},
@@ -20,29 +20,43 @@ use iced_layershell::{
 use chrono::Local;
 use mpris_client_async::{
     Mpris, Player,
-    player_types::Playback,
-    properties::{PlaybackStatus, Property},
+    player_types::{Loop, Playback},
+    properties::{
+        CanControl, CanGoNext, CanGoPrevious, CanPause, CanPlay, CanSeek, DesktopEntry, Identity,
+        LoopStatus, Metadata, PlaybackStatus, Property, Shuffle,
+    },
     streams::{mpris::MprisEvent, player::PropertyYield},
 };
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use async_std::sync::Mutex;
+
 // Weather backend
 mod weather;
-use crate::weather::{CurrentWeather, HourlyWeather};
+use crate::{
+    player::{PlayerBundle, PlayerName},
+    weather::{CurrentWeather, HourlyWeather},
+};
 use weather::prelude::*;
 
-// The notification of rusty bar to the user (things like errrors, notices, and other messages)
+// The notification of rusty bar to the user
+// (things like errrors, notices, and other messages)
 mod notification;
 use crate::notification::Notification;
+
+mod windows;
+use windows::weather_window;
 
 // Contains svgs and other small assets
 mod assets;
 use crate::assets::get_svg;
 
-mod windows;
-use windows::weather_window;
-
+// A graph
+// TODO: make it "widget"
 mod graph;
+
+// The Player struct
+mod player;
 
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -78,6 +92,9 @@ enum Message {
     //      MPRIS       \\
     MprisEvent(MprisEvent),
     PlayerPlaybackChange((Arc<Player>, Playback)),
+    // Gather current information of a player
+    InitTrackedPlayer(PlayerBundle),
+    TrackedPlayer(PlayerBundle),
 }
 
 #[derive(Default)]
@@ -113,7 +130,7 @@ struct State {
 
     //      MPRIS      \\
     players: Vec<Arc<Player>>,
-    tracked_player: Option<Arc<Player>>,
+    tracked_player: Option<PlayerBundle>,
 }
 
 impl State {
@@ -304,7 +321,7 @@ impl State {
                         self.players.retain(|player| player.dbus_name() != name);
 
                         if let Some(player) = &self.tracked_player
-                            && player.dbus_name() == name
+                            && player.inner.dbus_name() == name
                         {
                             println!("@M Tracked player removed => tracked player is None");
                             self.tracked_player = None
@@ -312,10 +329,9 @@ impl State {
 
                         Task::none()
                     }
-                    PropertyChange(any_change) => {
-                        if let Some(playback) = any_change
-                            .value
-                            .downcast_ref::<PropertyYield<PlaybackStatus>>()
+                    PropertyChange(change) => {
+                        if let Some(playback) =
+                            change.value.downcast_ref::<PropertyYield<PlaybackStatus>>()
                         {
                             let player = self
                                 .players
@@ -329,19 +345,83 @@ impl State {
                                 player.is_some()
                             );
 
-                            match player {
+                            return match player {
                                 None => Task::none(),
                                 Some(player) => Task::done(PlayerPlaybackChange((
                                     player.clone(),
                                     playback.value.clone(),
                                 ))),
-                            }
-                        } else {
-                            Task::none()
+                            };
                         }
+
+                        if let Some(player) = &mut self.tracked_player {
+                            if let Some(desktop_entry) =
+                                change.value.downcast_ref::<PropertyYield<DesktopEntry>>()
+                                && player.bus_name == desktop_entry.player_name
+                                && player.name < PlayerName::DesktopEntry(String::new())
+                            {
+                                player.name = PlayerName::DesktopEntry(desktop_entry.value.clone());
+                            } else if let Some(id) =
+                                change.value.downcast_ref::<PropertyYield<Identity>>()
+                                && player.bus_name == id.player_name
+                            {
+                                player.name = PlayerName::DisplayName(id.value.clone());
+                            } else if let Some(meta) =
+                                change.value.downcast_ref::<PropertyYield<Metadata>>()
+                                && player.bus_name == meta.player_name
+                            {
+                                player.metadata = Some(meta.value.clone());
+                            } else if let Some(loop_status) =
+                                change.value.downcast_ref::<PropertyYield<LoopStatus>>()
+                                && player.bus_name == loop_status.player_name
+                            {
+                                player.loop_status = loop_status.value;
+                            } else if let Some(is_shuffle) =
+                                change.value.downcast_ref::<PropertyYield<Shuffle>>()
+                                && player.bus_name == is_shuffle.player_name
+                            {
+                                player.is_shuffle = is_shuffle.value;
+                            } else if let Some(prop) =
+                                change.value.downcast_ref::<PropertyYield<CanGoNext>>()
+                                && player.bus_name == prop.player_name
+                            {
+                                player.can_go_next = prop.value;
+                            } else if let Some(prop) =
+                                change.value.downcast_ref::<PropertyYield<CanGoPrevious>>()
+                                && player.bus_name == prop.player_name
+                            {
+                                player.can_go_back = prop.value;
+                            } else if let Some(prop) =
+                                change.value.downcast_ref::<PropertyYield<CanPause>>()
+                                && player.bus_name == prop.player_name
+                            {
+                                player.can_pause = prop.value;
+                            } else if let Some(prop) =
+                                change.value.downcast_ref::<PropertyYield<CanPlay>>()
+                                && player.bus_name == prop.player_name
+                            {
+                                player.can_play = prop.value;
+                            } else if let Some(prop) =
+                                change.value.downcast_ref::<PropertyYield<CanSeek>>()
+                                && player.bus_name == prop.player_name
+                            {
+                                player.can_seek = prop.value;
+                            }
+                        }
+
+                        Task::none()
                     }
-                    _ => {
-                        println!("@@ MPRIS EVENT");
+                    PositionChange(post) => {
+                        if let Some(player) = &mut self.tracked_player
+                            && post.player_name == player.bus_name
+                        {
+                            player.position = post.value
+                        }
+
+                        Task::none()
+                    }
+                    SignalEmit(_) => {
+                        println!("@M Signal event");
                         Task::none()
                     }
                 }
@@ -353,8 +433,129 @@ impl State {
                     playback
                 );
 
-                if playback != Playback::Stopped {
-                    self.tracked_player = Some(player)
+                // Only set new tracked player if there is None tracked
+                // or if the tracked player is NOT the one that made the signal emit
+                //  and the tracked player has lower Playback value (Playing > Paused)
+                //  or the playback values are equal
+                if playback != Playback::Stopped
+                    && self.tracked_player.as_ref().map_or(true, |tracked| {
+                        player.dbus_name() != tracked.bus_name
+                            && (tracked.playback_status < playback
+                                || tracked.playback_status == playback)
+                    })
+                {
+                    println!("@M Now tracking {}", player.dbus_name());
+
+                    let bundle = PlayerBundle {
+                        inner: player.clone(),
+                        bus_name: player.dbus_name(),
+                        name: PlayerName::BusEntry(player.dbus_name().to_string()),
+                        metadata: None,
+                        playback_status: playback,
+                        loop_status: Loop::default(),
+                        is_shuffle: false,
+                        position: Duration::default(),
+                        can_go_next: false,
+                        can_go_back: false,
+                        can_play: false,
+                        can_pause: false,
+                        can_seek: false,
+                        can_control: false,
+                    };
+                    self.tracked_player = Some(bundle.clone());
+
+                    return Task::done(Message::InitTrackedPlayer(bundle));
+                }
+                Task::none()
+            }
+            InitTrackedPlayer(bundle) => Task::perform(
+                async move {
+                    println!("@@@@");
+
+                    let bundle = Arc::new(Mutex::new(bundle));
+                    let player = bundle.lock().await.inner.clone();
+
+                    // let bundle_clone = bundle.clone();
+                    join_all([
+                        async {
+                            if let Ok(name) = player.get(Identity).await {
+                                bundle.lock().await.name = PlayerName::DisplayName(name)
+                            } else if let Ok(entry) = player.get(DesktopEntry).await {
+                                bundle.lock().await.name = PlayerName::DesktopEntry(entry)
+                            }
+                        }
+                        .boxed(),
+                        async {
+                            bundle.lock().await.metadata = player.get(Metadata).await.ok();
+                        }
+                        .boxed(),
+                        async {
+                            if let Ok(playback) = player.get(PlaybackStatus).await {
+                                bundle.lock().await.playback_status = playback;
+                            }
+                        }
+                        .boxed(),
+                        async {
+                            if let Ok(loop_status) = player.get(LoopStatus).await {
+                                bundle.lock().await.loop_status = loop_status;
+                            }
+                        }
+                        .boxed(),
+                        async {
+                            if let Ok(shuffle) = player.get(Shuffle).await {
+                                bundle.lock().await.is_shuffle = shuffle
+                            }
+                        }
+                        .boxed(),
+                        async {
+                            if let Ok(prop) = player.get(CanGoNext).await {
+                                bundle.lock().await.can_go_next = prop
+                            }
+                        }
+                        .boxed(),
+                        async {
+                            if let Ok(prop) = player.get(CanGoPrevious).await {
+                                bundle.lock().await.can_go_back = prop
+                            }
+                        }
+                        .boxed(),
+                        async {
+                            if let Ok(prop) = player.get(CanPlay).await {
+                                bundle.lock().await.can_play = prop
+                            }
+                        }
+                        .boxed(),
+                        async {
+                            if let Ok(prop) = player.get(CanPause).await {
+                                bundle.lock().await.can_pause = prop
+                            }
+                        }
+                        .boxed(),
+                        async {
+                            if let Ok(prop) = player.get(CanSeek).await {
+                                bundle.lock().await.can_seek = prop
+                            }
+                        }
+                        .boxed(),
+                        async {
+                            if let Ok(prop) = player.get(CanControl).await {
+                                bundle.lock().await.can_control = prop
+                            }
+                        }
+                        .boxed(),
+                    ])
+                    .await;
+
+                    let bundle_lock = Arc::try_unwrap(bundle).expect("Failed to move out of Arc");
+                    bundle_lock.into_inner()
+                },
+                Message::TrackedPlayer,
+            ),
+            TrackedPlayer(bundle) => {
+                if let Some(player) = &self.tracked_player
+                    && player.bus_name == bundle.bus_name
+                {
+                    self.tracked_player = Some(bundle)
                 }
 
                 Task::none()
@@ -492,8 +693,15 @@ impl State {
         let media: Element<'_, Message> = {
             if let Some(player) = &self.tracked_player {
                 container(row![text(format!(
-                    "Media is playing :+1:, by player {}",
-                    player.dbus_name()
+                    "{} is {} - {}s - {}",
+                    player.name,
+                    player.playback_status,
+                    player.position.as_secs(),
+                    if let Some(meta) = &player.metadata {
+                        &meta.title
+                    } else {
+                        "??"
+                    }
                 ))])
                 .into()
             } else {
@@ -632,7 +840,23 @@ fn mpris_stream_builder(_id: &MprisPlug) -> BoxStream<'static, MprisEvent> {
             .expect("@M Failed to create MPRIS object: {0}");
 
         let mut stream = mpris
-            .new_event_loop(vec![PlaybackStatus.into_any()], vec![], false)
+            .new_event_loop(
+                vec![
+                    PlaybackStatus.into_any(),
+                    Metadata.into_any(),
+                    DesktopEntry.into_any(),
+                    Identity.into_any(),
+                    LoopStatus.into_any(),
+                    Shuffle.into_any(),
+                    CanGoNext.into_any(),
+                    CanGoPrevious.into_any(),
+                    CanPlay.into_any(),
+                    CanPause.into_any(),
+                    CanSeek.into_any(),
+                ],
+                vec![],
+                true,
+            )
             .await
             .expect("Failed to create event loop");
 
