@@ -36,6 +36,7 @@ mod weather;
 use crate::{
     player::{PlayerBundle, PlayerName},
     weather::{CurrentWeather, HourlyWeather},
+    widgets::circular_indicator,
 };
 use weather::prelude::*;
 
@@ -51,12 +52,25 @@ use windows::weather_window;
 mod assets;
 use crate::assets::get_svg;
 
-// A graph
-// TODO: make it "widget"
-mod graph;
+// Custom widgets
+mod widgets;
 
 // The Player struct
 mod player;
+
+// The following is required so the weather
+// and other init processes dont get parsed
+// on debug builds
+
+#[cfg(not(debug_assertions))]
+fn is_first_parse() -> bool {
+    true
+}
+
+#[cfg(debug_assertions)]
+fn is_first_parse() -> bool {
+    false
+}
 
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -151,7 +165,7 @@ impl State {
             clock_widget_width,
             hpadding,
             units,
-            first_parse: true,
+            first_parse: is_first_parse(),
             ..Default::default()
         }
     }
@@ -311,19 +325,18 @@ impl State {
                 use mpris_client_async::streams::mpris::MprisEvent::*;
                 match event {
                     Add(player) => {
-                        println!("@M Player added with name \"{}\"", player.dbus_name());
+                        // println!("@M Player added with name \"{}\"", player.dbus_name());
                         self.players.push(player);
 
                         Task::none()
                     }
                     Remove(name) => {
-                        println!("@M Player removed with name \"{}\"", name);
+                        // println!("@M Player removed with name \"{}\"", name);
                         self.players.retain(|player| player.dbus_name() != name);
 
                         if let Some(player) = &self.tracked_player
                             && player.inner.dbus_name() == name
                         {
-                            println!("@M Tracked player removed => tracked player is None");
                             self.tracked_player = None
                         }
 
@@ -338,12 +351,12 @@ impl State {
                                 .iter()
                                 .find(|other| other.dbus_name() == playback.player_name);
 
-                            println!(
-                                "@M Player {} is {}. Found object? {}",
-                                playback.player_name,
-                                playback.value,
-                                player.is_some()
-                            );
+                            // println!(
+                            //     "@M Player {} is {}. Found object? {}",
+                            //     playback.player_name,
+                            //     playback.value,
+                            //     player.is_some()
+                            // );
 
                             return match player {
                                 None => Task::none(),
@@ -421,18 +434,11 @@ impl State {
                         Task::none()
                     }
                     SignalEmit(_) => {
-                        println!("@M Signal event");
-                        Task::none()
+                        unreachable!()
                     }
                 }
             }
             PlayerPlaybackChange((player, playback)) => {
-                println!(
-                    "@M PlayerPlaybackChanged called, {}, {}",
-                    player.dbus_name(),
-                    playback
-                );
-
                 // Only set new tracked player if there is None tracked
                 // or if the tracked player is NOT the one that made the signal emit
                 //  and the tracked player has lower Playback value (Playing > Paused)
@@ -470,8 +476,6 @@ impl State {
             }
             InitTrackedPlayer(bundle) => Task::perform(
                 async move {
-                    println!("@@@@");
-
                     let bundle = Arc::new(Mutex::new(bundle));
                     let player = bundle.lock().await.inner.clone();
 
@@ -565,6 +569,7 @@ impl State {
         }
     }
 
+    #[inline]
     fn separator<'a>() -> Container<'a, Message, Theme, Renderer> {
         container(Space::new())
             .width(2)
@@ -692,17 +697,27 @@ impl State {
 
         let media: Element<'_, Message> = {
             if let Some(player) = &self.tracked_player {
-                container(row![text(format!(
-                    "{} is {} - {}s - {}",
-                    player.name,
-                    player.playback_status,
-                    player.position.as_secs(),
-                    if let Some(meta) = &player.metadata {
-                        &meta.title
-                    } else {
-                        "??"
-                    }
-                ))])
+                container(row![
+                    circular_indicator(
+                        0.5,
+                        Color::WHITE,
+                        Color::from_rgb(1.0, 0.0, 0.0),
+                        3.0,
+                        36.0,
+                        0.15,
+                    ),
+                    text(format!(
+                        "{} is {} - {}s - {}",
+                        player.name,
+                        player.playback_status,
+                        player.position.as_secs(),
+                        if let Some(meta) = &player.metadata {
+                            &meta.title
+                        } else {
+                            "??"
+                        }
+                    ))
+                ])
                 .into()
             } else {
                 container(space()).into()
@@ -719,7 +734,7 @@ impl State {
             }
         };
 
-        let left = row![clock, Self::separator(), weather_widget, media_group]
+        let left = row![clock, Self::separator(), weather_widget, media_group,]
             .align_y(Alignment::Center)
             .spacing(self.spacing);
 

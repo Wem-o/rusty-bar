@@ -17,7 +17,7 @@ use iced_layershell::to_layer_message;
 
 use crate::{
     get_svg,
-    graph::{Series, graph},
+    widgets::graph::{Series, graph},
 };
 
 /// The display mode of some data
