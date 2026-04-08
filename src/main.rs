@@ -6,6 +6,7 @@ use iced::{
     Padding, Renderer, Subscription, Task,
     animation::Easing,
     border::{self, Radius},
+    font::{Family, Weight},
     stream,
     theme::{self, Theme},
     widget::{
@@ -138,7 +139,6 @@ struct State {
 
     //  LEFT SIDE   \\
     clock: String,
-    clock_widget_width: u32, // TODO: ELLIMINATE!!
 
     // Parse initial values, it will only
     // be run once, when the program starts
@@ -176,7 +176,6 @@ impl Default for State {
             notifications: Default::default(),
             now: Instant::now(),
             clock: Default::default(),
-            clock_widget_width: Default::default(),
             first_parse: Default::default(),
             units: Default::default(),
             weather_current: Default::default(),
@@ -200,7 +199,6 @@ impl State {
         radius: i32,
         spacing: u32,
         time_fmt: &'static str,
-        clock_widget_width: u32,
         hpadding: u32,
         units: Units,
         enable_animations: bool,
@@ -211,7 +209,6 @@ impl State {
             radius,
             time_fmt,
             spacing,
-            clock_widget_width,
             hpadding,
             units,
             first_parse: is_first_parse(),
@@ -507,6 +504,12 @@ impl State {
                 }
             }
             PlayerPlaybackChange((player, playback)) => {
+                println!(
+                    "PlayerPlaybackChange called {} {}",
+                    player.dbus_name(),
+                    playback
+                );
+
                 // Only set new tracked player if there is None tracked
                 // or if the tracked player is NOT the one that made the signal emit
                 //  and the tracked player has lower Playback value (Playing > Paused)
@@ -683,8 +686,13 @@ impl State {
                 text(&self.clock)
                     .size(self.bar_content_height)
                     .center()
-                    .width(self.clock_widget_width)
-                    .style(text::primary),
+                    .width(Shrink)
+                    .style(text::primary)
+                    .font(Font {
+                        family: Family::Name("Roboto"),
+                        weight: Weight::Semibold,
+                        ..Default::default()
+                    }),
             )
             .padding(Padding::default().horizontal(self.hpadding))
             .width(Length::Shrink)
@@ -1008,7 +1016,6 @@ fn main() -> iced_layershell::Result {
     let radius = 10;
     let time_fmt = "%H:%M:%S";
     let spacing = 4;
-    let clock_widget_width = 140;
     let hpadding = 4;
     let units = Units::default();
     // let units = Units::new(Speed::Mph, TempUnit::Fahrenheit, weather::prelude::Length::Inch);
@@ -1020,7 +1027,6 @@ fn main() -> iced_layershell::Result {
                 radius,
                 spacing,
                 time_fmt,
-                clock_widget_width,
                 hpadding,
                 units.clone(),
                 true,
@@ -1042,7 +1048,10 @@ fn main() -> iced_layershell::Result {
             keyboard_interactivity: iced_layershell::reexport::KeyboardInteractivity::OnDemand,
             ..Default::default()
         },
-        fonts: vec![std::include_bytes!("assets/fonts/Itim-Regular.ttf").into()],
+        fonts: vec![
+            std::include_bytes!("assets/fonts/Itim-Regular.ttf").into(),
+            std::include_bytes!("assets/fonts/Roboto-SemiBold.ttf").into(),
+        ],
         default_font: Font::with_name("Itim"),
         ..Default::default()
     })
