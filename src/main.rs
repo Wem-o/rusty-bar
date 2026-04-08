@@ -1,10 +1,16 @@
 use futures::{FutureExt, SinkExt, StreamExt, future::join_all, stream::BoxStream};
 use iced::{
-    Alignment, Color, Element, Font, Length, Padding, Renderer, Subscription, Task,
+    Alignment::{self, Center},
+    Animation, Color, Element, Font,
+    Length::{self, Fill, Shrink},
+    Padding, Renderer, Subscription, Task,
+    animation::Easing,
     border::{self, Radius},
     stream,
     theme::{self, Theme},
-    widget::{Container, Space, button::Status, container, mouse_area, row, space, svg, text},
+    widget::{
+        Container, Space, button::Status, column, container, mouse_area, row, space, svg, text,
+    },
     window,
 };
 
@@ -27,7 +33,11 @@ use mpris_client_async::{
     },
     streams::{mpris::MprisEvent, player::PropertyYield},
 };
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use async_std::sync::Mutex;
 
@@ -89,6 +99,8 @@ enum Message {
     NewNotif(Notification),
     NotifRetry(Notification),
 
+    Tick(Instant),
+
     SecondTrigger,
 
     //      WEATHER     \\
@@ -111,7 +123,6 @@ enum Message {
     TrackedPlayer(PlayerBundle),
 }
 
-#[derive(Default)]
 struct State {
     //  GLOBAL VARS \\
     window_ids: HashMap<window::Id, WindowType>,
@@ -121,6 +132,9 @@ struct State {
     spacing: u32,
     hpadding: u32,
     notifications: Vec<Notification>,
+    now: Instant,
+    enable_animations: bool,
+    bar_content_height: f32,
 
     //  LEFT SIDE   \\
     clock: String,
@@ -145,6 +159,39 @@ struct State {
     //      MPRIS      \\
     players: Vec<Arc<Player>>,
     tracked_player: Option<PlayerBundle>,
+    tracked_player_progress: Animation<f32>,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            window_ids: Default::default(),
+            theme: Default::default(),
+            radius: Default::default(),
+            time_fmt: Default::default(),
+            enable_animations: true,
+            bar_content_height: 36.0,
+            spacing: Default::default(),
+            hpadding: Default::default(),
+            notifications: Default::default(),
+            now: Instant::now(),
+            clock: Default::default(),
+            clock_widget_width: Default::default(),
+            first_parse: Default::default(),
+            units: Default::default(),
+            weather_current: Default::default(),
+            tracked_location: Default::default(),
+            weather_hourly: Default::default(),
+            weather_hours_to_parse: Default::default(),
+            weather_window_id: Default::default(),
+            weather_window_state: Default::default(),
+            players: Default::default(),
+            tracked_player: Default::default(),
+            tracked_player_progress: Animation::new(0.0)
+                .duration(Duration::from_millis(300))
+                .easing(Easing::EaseInOut),
+        }
+    }
 }
 
 impl State {
@@ -156,6 +203,8 @@ impl State {
         clock_widget_width: u32,
         hpadding: u32,
         units: Units,
+        enable_animations: bool,
+        bar_content_height: f32,
     ) -> Self {
         Self {
             theme: Some(theme),
@@ -166,6 +215,8 @@ impl State {
             hpadding,
             units,
             first_parse: is_first_parse(),
+            enable_animations,
+            bar_content_height,
             ..Default::default()
         }
     }
@@ -198,6 +249,11 @@ impl State {
                 } else {
                     Task::none()
                 }
+            }
+
+            Tick(instant) => {
+                self.now = instant;
+                Task::none()
             }
 
             //      WEATHER     \\
@@ -337,7 +393,7 @@ impl State {
                         if let Some(player) = &self.tracked_player
                             && player.inner.dbus_name() == name
                         {
-                            self.tracked_player = None
+                            self.tracked_player = None;
                         }
 
                         Task::none()
@@ -428,7 +484,19 @@ impl State {
                         if let Some(player) = &mut self.tracked_player
                             && post.player_name == player.bus_name
                         {
-                            player.position = post.value
+                            player.position = post.value;
+
+                            // Set up the position tracking
+                            if let Some(meta) = &player.metadata
+                                && let Some(length) = meta.length
+                            {
+                                let now = Instant::now();
+                                self.tracked_player_progress.go_mut(
+                                    player.position.as_secs_f32() / length.as_secs_f32(),
+                                    now,
+                                );
+                                self.now = now;
+                            }
                         }
 
                         Task::none()
@@ -559,6 +627,15 @@ impl State {
                 if let Some(player) = &self.tracked_player
                     && player.bus_name == bundle.bus_name
                 {
+                    // Set up the position tracking
+                    if let Some(meta) = &bundle.metadata
+                        && let Some(length) = meta.length
+                    {
+                        let now = Instant::now();
+                        self.tracked_player_progress
+                            .go_mut(bundle.position.as_secs_f32() / length.as_secs_f32(), now);
+                        self.now = now;
+                    }
                     self.tracked_player = Some(bundle)
                 }
 
@@ -604,7 +681,7 @@ impl State {
         let clock = {
             container(
                 text(&self.clock)
-                    .size(36)
+                    .size(self.bar_content_height)
                     .center()
                     .width(self.clock_widget_width)
                     .style(text::primary),
@@ -640,12 +717,12 @@ impl State {
                         mouse_area(
                             row![
                                 svg(svg_handle)
-                                    .width(36)
-                                    .height(36)
+                                    .width(self.bar_content_height)
+                                    .height(self.bar_content_height)
                                     .content_fit(iced::ContentFit::Fill),
                                 text(weather.temperature.as_ref().unwrap().stringify())
                                     .align_y(Alignment::Center)
-                                    .size(36)
+                                    .size(self.bar_content_height)
                                     .style(text::primary)
                             ]
                             .spacing(5)
@@ -697,27 +774,108 @@ impl State {
 
         let media: Element<'_, Message> = {
             if let Some(player) = &self.tracked_player {
-                container(row![
-                    circular_indicator(
-                        0.5,
-                        Color::WHITE,
-                        Color::from_rgb(1.0, 0.0, 0.0),
+                let progress_bar: Element<'_, Message> = {
+                    let percentage = if self.enable_animations {
+                        let value = self
+                            .tracked_player_progress
+                            .interpolate_with(|v| v.clamp(0.0, 1.0), self.now);
+
+                        assert!(
+                            value.is_finite(),
+                            "Interpolated animation value is infinite!"
+                        );
+                        value
+                    } else {
+                        self.tracked_player_progress.value()
+                    };
+
+                    let primary = self
+                        .theme
+                        .as_ref()
+                        .unwrap()
+                        .extended_palette()
+                        .primary
+                        .strong
+                        .color;
+
+                    let secondary = self
+                        .theme
+                        .as_ref()
+                        .unwrap()
+                        .extended_palette()
+                        .secondary
+                        .strong
+                        .color;
+
+                    container(circular_indicator(
+                        percentage,
+                        primary,
+                        secondary,
                         3.0,
-                        36.0,
+                        self.bar_content_height - 2.0,
                         0.15,
-                    ),
-                    text(format!(
-                        "{} is {} - {}s - {}",
-                        player.name,
-                        player.playback_status,
-                        player.position.as_secs(),
-                        if let Some(meta) = &player.metadata {
-                            &meta.title
-                        } else {
-                            "??"
-                        }
                     ))
-                ])
+                    .width(self.bar_content_height - 2.0)
+                    .height(self.bar_content_height - 2.0)
+                    .align_x(Center)
+                    .into()
+                };
+
+                container(
+                    row![
+                        progress_bar,
+                        if let Some(meta) = &player.metadata {
+                            let mut artists = String::new();
+                            for (idx, artist) in meta.artists.iter().enumerate() {
+                                if idx == 0 {
+                                    artists = artist.clone()
+                                } else {
+                                    artists.push_str(format!(", {}", artist.as_str()).as_str());
+                                }
+                            }
+
+                            column![
+                                text!("{}", meta.title)
+                                    .size(17)
+                                    .align_x(Center)
+                                    .style(text::primary)
+                                    .align_x(Center),
+                                row![
+                                    text(if !artists.is_empty() && !meta.album.is_empty() {
+                                        format!("{} - {}", artists, meta.album)
+                                    } else if !artists.is_empty() {
+                                        format!("{}", artists)
+                                    } else if !meta.album.is_empty() {
+                                        format!("{}", meta.album)
+                                    } else {
+                                        String::new()
+                                    })
+                                    .size(11)
+                                    .line_height(0.95)
+                                    .style(text::secondary)
+                                    .align_x(Center),
+                                ]
+                                .height(Fill)
+                                .padding(Padding::default().right(2))
+                            ]
+                            .height(Fill)
+                            .width(Shrink)
+                        } else {
+                            column![]
+                        }
+                    ]
+                    .spacing(self.spacing),
+                )
+                .height(self.bar_content_height)
+                .width(Length::Shrink)
+                .padding(Padding::default().horizontal(self.hpadding))
+                .style(|theme: &Theme| {
+                    let palette = theme.extended_palette();
+
+                    container::Style::default()
+                        .background(palette.background.weak.color)
+                        .border(border::rounded(self.radius))
+                })
                 .into()
             } else {
                 container(space()).into()
@@ -769,13 +927,21 @@ impl State {
         .into()
     }
 
-    fn subscription(_state: &State) -> Subscription<Message> {
-        let subs = vec![
+    fn subscription(state: &State) -> Subscription<Message> {
+        let mut subs = vec![
             iced::time::every(Duration::from_secs(1)).map(|_| Message::SecondTrigger),
             iced::time::every(Duration::from_mins(15)).map(|_| Message::ParseCurrentWeather),
             iced::Subscription::run_with(MprisPlug, mpris_stream_builder)
                 .map(|event| Message::MprisEvent(event)),
         ];
+
+        // Animation tick driver
+        if state.enable_animations
+            && state.tracked_player.is_some()
+            && state.tracked_player_progress.is_animating(state.now)
+        {
+            subs.push(iced::time::every(Duration::from_millis(30)).map(Message::Tick));
+        }
 
         Subscription::batch(subs)
     }
@@ -786,60 +952,6 @@ impl State {
             text_color: theme.palette().text,
         }
     }
-}
-
-fn main() -> iced_layershell::Result {
-    assets::load_assets();
-
-    // Setting ICED_BACKEND to software will panic, for some reason...
-    unsafe {
-        std::env::set_var("ICED_BACKEND", "tiny-skia");
-    }
-
-    let theme = Theme::CatppuccinMocha;
-    let radius = 10;
-    let time_fmt = "%H:%M:%S";
-    let spacing = 4;
-    let clock_widget_width = 140;
-    let hpadding = 4;
-    let units = Units::default();
-    // let units = Units::new(Speed::Mph, TempUnit::Fahrenheit, weather::prelude::Length::Inch);
-
-    daemon(
-        move || {
-            State::new(
-                theme.clone(),
-                radius,
-                spacing,
-                time_fmt,
-                clock_widget_width,
-                hpadding,
-                units.clone(),
-            )
-        },
-        "Rusty Bar",
-        State::update,
-        State::view,
-    )
-    .settings(Settings {
-        layer_settings: LayerShellSettings {
-            layer: iced_layershell::reexport::Layer::Top,
-            size: Some((0, 50)),
-            start_mode: StartMode::AllScreens,
-            anchor: Anchor::Top | Anchor::Left | Anchor::Right,
-            exclusive_zone: 50,
-            margin: (5, 10, 5, 10),
-            keyboard_interactivity: iced_layershell::reexport::KeyboardInteractivity::OnDemand,
-            ..Default::default()
-        },
-        fonts: vec![std::include_bytes!("assets/fonts/Itim-Regular.ttf").into()],
-        default_font: Font::with_name("Itim"),
-        ..Default::default()
-    })
-    .style(State::style)
-    .theme(|state: &State, _| state.theme.clone())
-    .subscription(State::subscription)
-    .run()
 }
 
 // Zero sized type to id the mpirs stream builder,
@@ -882,4 +994,60 @@ fn mpris_stream_builder(_id: &MprisPlug) -> BoxStream<'static, MprisEvent> {
         println!("@M MPRIS stream ended!!!")
     })
     .boxed()
+}
+
+fn main() -> iced_layershell::Result {
+    assets::load_assets();
+
+    // Setting ICED_BACKEND to software will panic, for some reason...
+    unsafe {
+        std::env::set_var("ICED_BACKEND", "tiny-skia");
+    }
+
+    let theme = Theme::CatppuccinMocha;
+    let radius = 10;
+    let time_fmt = "%H:%M:%S";
+    let spacing = 4;
+    let clock_widget_width = 140;
+    let hpadding = 4;
+    let units = Units::default();
+    // let units = Units::new(Speed::Mph, TempUnit::Fahrenheit, weather::prelude::Length::Inch);
+
+    daemon(
+        move || {
+            State::new(
+                theme.clone(),
+                radius,
+                spacing,
+                time_fmt,
+                clock_widget_width,
+                hpadding,
+                units.clone(),
+                true,
+                36.0,
+            )
+        },
+        "Rusty Bar",
+        State::update,
+        State::view,
+    )
+    .settings(Settings {
+        layer_settings: LayerShellSettings {
+            layer: iced_layershell::reexport::Layer::Top,
+            size: Some((0, 50)),
+            start_mode: StartMode::AllScreens,
+            anchor: Anchor::Top | Anchor::Left | Anchor::Right,
+            exclusive_zone: 50,
+            margin: (5, 10, 5, 10),
+            keyboard_interactivity: iced_layershell::reexport::KeyboardInteractivity::OnDemand,
+            ..Default::default()
+        },
+        fonts: vec![std::include_bytes!("assets/fonts/Itim-Regular.ttf").into()],
+        default_font: Font::with_name("Itim"),
+        ..Default::default()
+    })
+    .style(State::style)
+    .theme(|state: &State, _| state.theme.clone())
+    .subscription(State::subscription)
+    .run()
 }
