@@ -7,10 +7,12 @@ use iced::{
     animation::Easing,
     border::{self, Radius},
     font::{Family, Weight},
+    mouse::Interaction,
     stream,
     theme::{self, Theme},
     widget::{
-        Container, Space, button::Status, column, container, mouse_area, row, space, svg, text,
+        Container, Space, button::Status, column, container, mouse_area, row, space, stack, svg,
+        text,
     },
     window,
 };
@@ -47,7 +49,7 @@ mod weather;
 use crate::{
     player::{PlayerBundle, PlayerName},
     weather::{CurrentWeather, HourlyWeather},
-    widgets::circular_indicator,
+    widgets::{circular_indicator, play_pause_animated},
 };
 use weather::prelude::*;
 
@@ -122,6 +124,8 @@ enum Message {
     // Gather current information of a player
     InitTrackedPlayer(PlayerBundle),
     TrackedPlayer(PlayerBundle),
+    TogglePlaybackStatus,
+    TrackedPlayStatusChange,
 }
 
 struct State {
@@ -160,6 +164,7 @@ struct State {
     players: Vec<Arc<Player>>,
     tracked_player: Option<PlayerBundle>,
     tracked_player_progress: Animation<f32>,
+    tracked_play_status: Animation<bool>,
 }
 
 impl Default for State {
@@ -189,6 +194,9 @@ impl Default for State {
             tracked_player_progress: Animation::new(0.0)
                 .duration(Duration::from_millis(300))
                 .easing(Easing::EaseInOut),
+            tracked_play_status: Animation::new(false)
+                .duration(Duration::from_millis(300))
+                .easing(Easing::EaseOutQuad),
         }
     }
 }
@@ -504,16 +512,16 @@ impl State {
                 }
             }
             PlayerPlaybackChange((player, playback)) => {
-                println!(
-                    "PlayerPlaybackChange called {} {}",
-                    player.dbus_name(),
-                    playback
-                );
+                // println!(
+                //     "PlayerPlaybackChange called {} {}",
+                //     player.dbus_name(),
+                //     playback
+                // );
 
                 // Only set new tracked player if there is None tracked
                 // or if the tracked player is NOT the one that made the signal emit
                 //  and the tracked player has lower Playback value (Playing > Paused)
-                //  or the playback values are equal
+                //  or the playback values are equalif let
                 if playback != Playback::Stopped
                     && self.tracked_player.as_ref().map_or(true, |tracked| {
                         player.dbus_name() != tracked.bus_name
@@ -541,9 +549,15 @@ impl State {
                     };
                     self.tracked_player = Some(bundle.clone());
 
-                    return Task::done(Message::InitTrackedPlayer(bundle));
+                    Task::done(Message::InitTrackedPlayer(bundle))
+                } else if let Some(tracking) = &mut self.tracked_player
+                    && tracking.bus_name == player.dbus_name()
+                {
+                    tracking.playback_status = playback;
+                    Task::done(TrackedPlayStatusChange)
+                } else {
+                    Task::none()
                 }
-                Task::none()
             }
             InitTrackedPlayer(bundle) => Task::perform(
                 async move {
@@ -642,6 +656,33 @@ impl State {
                     self.tracked_player = Some(bundle)
                 }
 
+                Task::done(TrackedPlayStatusChange)
+            }
+            TogglePlaybackStatus => {
+                let maybe_tracked = self.tracked_player.clone();
+
+                Task::perform(
+                    async move {
+                        if let Some(player) = maybe_tracked {
+                            let _ = player.inner.play_pause().await;
+                            // println!(
+                            //     "Player {} play_pause toggled: {:?}",
+                            //     player.bus_name, result
+                            // );
+                        }
+                    },
+                    |_| TrackedPlayStatusChange,
+                )
+            }
+            TrackedPlayStatusChange => {
+                if let Some(player) = &self.tracked_player {
+                    // println!("Player is {}", player.playback_status);
+                    let is_playing = match &player.playback_status {
+                        Playback::Playing => true,
+                        _ => false,
+                    };
+                    self.tracked_play_status.go_mut(is_playing, self.now);
+                }
                 Task::none()
             }
 
@@ -783,20 +824,6 @@ impl State {
         let media: Element<'_, Message> = {
             if let Some(player) = &self.tracked_player {
                 let progress_bar: Element<'_, Message> = {
-                    let percentage = if self.enable_animations {
-                        let value = self
-                            .tracked_player_progress
-                            .interpolate_with(|v| v.clamp(0.0, 1.0), self.now);
-
-                        assert!(
-                            value.is_finite(),
-                            "Interpolated animation value is infinite!"
-                        );
-                        value
-                    } else {
-                        self.tracked_player_progress.value()
-                    };
-
                     let primary = self
                         .theme
                         .as_ref()
@@ -815,19 +842,64 @@ impl State {
                         .strong
                         .color;
 
-                    container(circular_indicator(
-                        percentage,
-                        primary,
-                        secondary,
-                        3.0,
-                        self.bar_content_height - 2.0,
-                        0.15,
-                    ))
-                    .width(self.bar_content_height - 2.0)
-                    .height(self.bar_content_height - 2.0)
-                    .align_x(Center)
+                    let percentage = if self.enable_animations {
+                        let value = self
+                            .tracked_player_progress
+                            .interpolate_with(|v| v.clamp(0.0, 1.0), self.now);
+
+                        assert!(
+                            value.is_finite(),
+                            "Interpolated animation value is infinite!"
+                        );
+                        value
+                    } else {
+                        self.tracked_player_progress.value()
+                    };
+                    let line_width = 3.0;
+
+                    let paused_value = {
+                        if self.enable_animations {
+                            self.tracked_play_status.interpolate(0.0, 1.0, self.now)
+                        } else {
+                            if self.tracked_play_status.value() {
+                                1.0
+                            } else {
+                                0.0
+                            }
+                        }
+                    };
+                    let pause_button = {
+                        play_pause_animated(
+                            paused_value,
+                            primary,
+                            self.bar_content_height - 4.0 - 4.0 * line_width - 5.5,
+                        )
+                    };
+
+                    mouse_area(
+                        container(stack!(
+                            container(circular_indicator(
+                                percentage,
+                                primary,
+                                secondary,
+                                line_width,
+                                self.bar_content_height - 2.0,
+                                0.15,
+                            ))
+                            .center_x(Fill)
+                            .center_y(Fill),
+                            container(pause_button).center_x(Fill).center_y(Fill)
+                        ))
+                        .width(self.bar_content_height - 2.0)
+                        .height(self.bar_content_height - 2.0)
+                        .align_x(Center),
+                    )
+                    .on_press(Message::TogglePlaybackStatus)
+                    .interaction(Interaction::Grabbing)
                     .into()
                 };
+
+                // =======
 
                 container(
                     row![
@@ -876,6 +948,7 @@ impl State {
                 )
                 .height(self.bar_content_height)
                 .width(Length::Shrink)
+                .align_x(Center)
                 .padding(Padding::default().horizontal(self.hpadding))
                 .style(|theme: &Theme| {
                     let palette = theme.extended_palette();
@@ -946,7 +1019,8 @@ impl State {
         // Animation tick driver
         if state.enable_animations
             && state.tracked_player.is_some()
-            && state.tracked_player_progress.is_animating(state.now)
+            && (state.tracked_player_progress.is_animating(state.now)
+                || state.tracked_player_progress.is_animating(state.now))
         {
             subs.push(iced::time::every(Duration::from_millis(30)).map(Message::Tick));
         }
@@ -1012,6 +1086,7 @@ fn main() -> iced_layershell::Result {
         std::env::set_var("ICED_BACKEND", "tiny-skia");
     }
 
+    let enable_animations = true;
     let theme = Theme::CatppuccinMocha;
     let radius = 10;
     let time_fmt = "%H:%M:%S";
@@ -1029,7 +1104,7 @@ fn main() -> iced_layershell::Result {
                 time_fmt,
                 hpadding,
                 units.clone(),
-                true,
+                enable_animations,
                 36.0,
             )
         },
